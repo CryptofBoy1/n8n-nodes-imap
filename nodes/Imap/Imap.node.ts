@@ -7,6 +7,8 @@ import { NodeApiError } from 'n8n-workflow';
 import { loadMailboxList } from './utils/SearchFieldParameters';
 import { CREDENTIALS_TYPE_CORE_IMAP_ACCOUNT, CREDENTIALS_TYPE_THIS_NODE, credentialNames, getImapCredentials } from './utils/CredentialsSelector';
 
+// Add a new constant for our new credential type
+const CREDENTIALS_TYPE_FROM_INPUT = 'fromInput';
 
 export class Imap implements INodeType {
   description: INodeTypeDescription = {
@@ -51,6 +53,7 @@ export class Imap implements INodeType {
           },
         },
       },
+      // We don't define credentials for fromInput mode
       // TODO: using OAuth2
       /*{
         name: credentialNames[CREDENTIALS_TYPE_OAUTH2],
@@ -85,12 +88,34 @@ export class Imap implements INodeType {
             value: CREDENTIALS_TYPE_CORE_IMAP_ACCOUNT,
             description: 'Use existing credentials from N8N IMAP Trigger node',
           },
+          {
+            name: 'From Input',
+            value: CREDENTIALS_TYPE_FROM_INPUT,
+            description: 'Use credentials from previous node input',
+          },
           /*{
             name: 'OAuth2',
             value: CREDENTIALS_TYPE_OAUTH2,
             description: 'Use OAuth2 authentication',
           },*/
         ],
+      },
+
+      // Add fields for FromInput credentials
+      {
+        displayName: 'Input Field for Credentials',
+        name: 'credentialsField',
+        type: 'string',
+        default: 'credentials',
+        description: 'The field in the input data that contains the credentials',
+        placeholder: 'credentials',
+        displayOptions: {
+          show: {
+            authentication: [
+              CREDENTIALS_TYPE_FROM_INPUT,
+            ],
+          },
+        },
       },
 
       // eslint-disable-next-line n8n-nodes-base/node-param-default-missing
@@ -110,7 +135,56 @@ export class Imap implements INodeType {
   };
 
   async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][] > {
-    const credentials = await getImapCredentials(this);
+    // Get the first item to determine if we're using input credentials
+    const FIRST_ITEM_INDEX = 0;
+    const authentication = this.getNodeParameter('authentication', FIRST_ITEM_INDEX) as string;
+    
+    // Get credentials - either from n8n credential store or from input
+    let credentials: ImapCredentialsData;
+    
+    if (authentication === CREDENTIALS_TYPE_FROM_INPUT) {
+      // Get the items that were passed in
+      const items = this.getInputData();
+      
+      // Make sure we have at least one item
+      if (items.length === 0) {
+        throw new NodeApiError(this.getNode(), {}, {
+          message: 'No input items provided',
+        });
+      }
+      
+      // Get the field name that contains the credentials
+      const credentialsField = this.getNodeParameter('credentialsField', FIRST_ITEM_INDEX) as string;
+      
+      // Get the credentials from the first item
+      const inputCredentials = items[FIRST_ITEM_INDEX].json[credentialsField];
+      
+      if (!inputCredentials) {
+        throw new NodeApiError(this.getNode(), {}, {
+          message: `No credentials found in field "${credentialsField}"`,
+        });
+      }
+      
+      // Validate the credentials
+      if (!inputCredentials.host || !inputCredentials.user || !inputCredentials.password) {
+        throw new NodeApiError(this.getNode(), {}, {
+          message: 'Credentials must contain at least host, user, and password fields',
+        });
+      }
+      
+      // Extract the credentials
+      credentials = {
+        host: inputCredentials.host as string,
+        port: inputCredentials.port as number || 993,
+        user: inputCredentials.user as string,
+        password: inputCredentials.password as string,
+        tls: inputCredentials.tls !== false, // Default to true if not specified
+        allowUnauthorizedCerts: inputCredentials.allowUnauthorizedCerts === true,
+      };
+    } else {
+      // Use the standard method to get credentials
+      credentials = await getImapCredentials(this);
+    }
 
     // create imap client and connect
     const N8N_LOG_LEVEL = process.env.N8N_LOG_LEVEL || 'info';
@@ -128,8 +202,6 @@ export class Imap implements INodeType {
 
     // try/catch to close connection in any case
     try {
-
-
       // get node parameters
       const FIRST_ITEM_INDEX = 0; // resource and operation are the same for all items
       const resource = this.getNodeParameter('resource', FIRST_ITEM_INDEX) as string;
@@ -237,8 +309,5 @@ export class Imap implements INodeType {
         };
       },
     },
-
   };
-
 }
-
